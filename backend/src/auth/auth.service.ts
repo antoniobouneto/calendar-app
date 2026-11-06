@@ -1,4 +1,5 @@
 import { Injectable, UnauthorizedException, Logger } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
 import { JwtService } from '@nestjs/jwt';
 import * as bcrypt from 'bcryptjs';
 import { randomUUID } from 'crypto';
@@ -36,7 +37,17 @@ export class AuthService {
   constructor(
     private readonly jwtService: JwtService,
     private readonly valkeyService: ValkeyService,
+    private readonly config: ConfigService,
   ) {}
+
+  private jwtTtlSeconds(): number {
+    const raw = this.config.get<string>('JWT_EXPIRATION', '1h');
+    if (/^\d+$/.test(raw)) return Number(raw);
+    const m = /^(\d+)(s|m|h|d)$/.exec(raw);
+    if (!m) return 3600;
+    const n = Number(m[1]);
+    return { s: n, m: n * 60, h: n * 3600, d: n * 86400 }[m[2]] ?? 3600;
+  }
 
   async login(email: string, pass: string) {
     // Normalizar email para comparação
@@ -66,8 +77,9 @@ export class AuthService {
 
     const accessToken = await this.jwtService.signAsync(payload);
 
-    // Salva as roles do usuário na Estrutura de Dados SET do Valkey (SADD) -> Performance O(1)
-    await this.valkeyService.addRoleSet(user.id, jti, user.roles, 3600);
+    // Salva as roles do usuário na Estrutura de Dados SET do Valkey (SADD) -> Performance O(1).
+    // TTL da chave = TTL do JWT (item 3): sem vazamento de sessão após expirar.
+    await this.valkeyService.addRoleSet(user.id, jti, user.roles, this.jwtTtlSeconds());
 
     this.logger.log(`Usuário ${user.email} autenticado no Valkey (Set O(1)). Sessão jti=${jti}`);
 
@@ -85,6 +97,12 @@ export class AuthService {
     await this.valkeyService.invalidateRoleSet(userId, jti);
     this.logger.log(`Sessão jti=${jti} do usuário ${userId} foi revogada no Valkey.`);
     return { message: 'Logout realizado e sessão revogada com sucesso.' };
+  }
+
+  async me(userId: string, _jti: string) {
+    const user = this.mockUsers.find((u) => u.id === userId);
+    if (!user) throw new UnauthorizedException('Usuário não encontrado');
+    return { user: { id: user.id, email: user.email, roles: user.roles } };
   }
 }
 

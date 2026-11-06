@@ -4,6 +4,7 @@ import {
   ExecutionContext,
   UnauthorizedException,
   ForbiddenException,
+  ServiceUnavailableException,
 } from '@nestjs/common';
 import { Reflector } from '@nestjs/core';
 import { JwtService } from '@nestjs/jwt';
@@ -48,14 +49,21 @@ export class SecurityGuard implements CanActivate {
     // Se nenhuma role específica for exigida, verifica apenas se o usuário tem a permissão genérica 'USER' no Valkey Set (O(1))
     const rolesToCheck = requiredRoles && requiredRoles.length > 0 ? requiredRoles : ['USER', 'ADMIN'];
 
-    // Validação O(1) de permissão / revogação no Valkey via SISMEMBER
+    // Validação O(1) de permissão / revogação no Valkey via SISMEMBER.
+    // Fail-closed: Valkey fora (sem fallback dev) vira 503, nunca 403/401
+    // mascarado — o chamador precisa saber que a infra falhou, item 1.
     let hasPermission = false;
-    for (const role of rolesToCheck) {
-      const isMember = await this.valkeyService.hasRoleInSet(userId, jti, role);
-      if (isMember) {
-        hasPermission = true;
-        break;
+    try {
+      for (const role of rolesToCheck) {
+        const isMember = await this.valkeyService.hasRoleInSet(userId, jti, role);
+        if (isMember) {
+          hasPermission = true;
+          break;
+        }
       }
+    } catch (err) {
+      if (err instanceof ServiceUnavailableException) throw err;
+      throw new ServiceUnavailableException('Service temporarily unavailable: session store offline');
     }
 
     if (!hasPermission) {
@@ -70,6 +78,9 @@ export class SecurityGuard implements CanActivate {
   }
 
   private extractTokenFromHeader(request: any): string | undefined {
+    // Preferência: cookie httpOnly (frontend). Fallback: Bearer (API/mobile) — item 4.
+    const fromCookie = request.cookies?.calendar_jwt;
+    if (fromCookie) return fromCookie;
     const [type, token] = request.headers.authorization?.split(' ') ?? [];
     return type === 'Bearer' ? token : undefined;
   }

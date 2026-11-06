@@ -64,8 +64,8 @@ const Calendar = () => {
   const [loading, setLoading] = useState(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
 
-  // Auth State
-  const [token, setToken] = useState<string | null>(null);
+  // Auth State (item 4): o JWT vive num cookie httpOnly (invisível ao JS).
+  // O frontend guarda só o perfil exibível (email/roles), nunca o token.
   const [user, setUser] = useState<UserProfile | null>(null);
   const [showLoginModal, setShowLoginModal] = useState(false);
   const [showAddEventModal, setShowAddEventModal] = useState(false);
@@ -105,29 +105,32 @@ const Calendar = () => {
   const [exportLoading, setExportLoading] = useState(false);
   const [exportFeedback, setExportFeedback] = useState<{ type: 'ok' | 'warn' | 'err'; text: string } | null>(null);
 
-  // Load Auth State from LocalStorage
+  // Restore session via httpOnly cookie (GET /auth/me). Also migrates away
+  // any legacy localStorage token from versions before item 4.
   useEffect(() => {
-    const savedToken = localStorage.getItem('calendar_jwt');
-    const savedUser = localStorage.getItem('calendar_user');
-    if (savedToken && savedUser) {
-      setToken(savedToken);
+    localStorage.removeItem('calendar_jwt');
+    (async () => {
       try {
-        const parsed = JSON.parse(savedUser);
-        setUser(parsed);
-        if (parsed?.email) setExportEmail(parsed.email);
+        const res = await fetch('http://localhost:5000/api/auth/me', { credentials: 'include' });
+        if (res.ok) {
+          const data = await res.json();
+          setUser(data.user);
+        } else {
+          setUser(null);
+        }
       } catch {
-        localStorage.removeItem('calendar_user');
+        setUser(null);
       }
-    }
+    })();
   }, []);
 
   useEffect(() => {
     if (user?.email) setExportEmail((prev) => prev || user.email);
   }, [user]);
 
-  // Fetch Events when Token changes
-  const fetchEvents = useCallback(async (authToken: string | null) => {
-    if (!authToken) {
+  // Fetch Events when session (user) changes — cookie httpOnly vai junto
+  const fetchEvents = useCallback(async (sessao: boolean) => {
+    if (!sessao) {
       setEvents([]);
       return;
     }
@@ -135,9 +138,7 @@ const Calendar = () => {
     setErrorMsg(null);
     try {
       const res = await fetch('http://localhost:5000/api/events', {
-        headers: {
-          'Authorization': `Bearer ${authToken}`,
-        },
+        credentials: 'include',
       });
 
       if (!res.ok) {
@@ -161,8 +162,8 @@ const Calendar = () => {
   }, []);
 
   useEffect(() => {
-    fetchEvents(token);
-  }, [token, fetchEvents]);
+    fetchEvents(!!user);
+  }, [user, fetchEvents]);
 
   // Handle Login
   const handleLogin = async (e?: React.FormEvent) => {
@@ -173,6 +174,7 @@ const Calendar = () => {
     try {
       const res = await fetch('http://localhost:5000/api/auth/login', {
         method: 'POST',
+        credentials: 'include',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ email: emailInput, password: passwordInput }),
       });
@@ -182,10 +184,9 @@ const Calendar = () => {
         throw new Error(data.message || 'Falha ao autenticar.');
       }
 
-      setToken(data.access_token);
+      // Cookie httpOnly já gravado pelo backend; guardamos só o perfil exibível.
       setUser(data.user);
-      localStorage.setItem('calendar_jwt', data.access_token);
-      localStorage.setItem('calendar_user', JSON.stringify(data.user));
+      localStorage.removeItem('calendar_jwt');
       setShowLoginModal(false);
     } catch (err: any) {
       setErrorMsg(err.message || 'Erro ao realizar login');
@@ -196,27 +197,23 @@ const Calendar = () => {
 
   // Handle Logout
   const handleLogout = async () => {
-    if (token) {
-      try {
-        await fetch('http://localhost:5000/api/auth/logout', {
-          method: 'POST',
-          headers: { 'Authorization': `Bearer ${token}` },
-        });
-      } catch {
-        // Ignore logout errors
-      }
+    try {
+      await fetch('http://localhost:5000/api/auth/logout', {
+        method: 'POST',
+        credentials: 'include',
+      });
+    } catch {
+      // Ignore logout errors
     }
-    setToken(null);
     setUser(null);
     localStorage.removeItem('calendar_jwt');
-    localStorage.removeItem('calendar_user');
     setEvents([]);
   };
 
   // Handle Create Event (grade horária — permite vários eventos no mesmo dia)
   const handleCreateEvent = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!token) return;
+    if (!user) return;
     if (!eventTitle.trim()) return;
 
     // Monta o intervalo [início, fim] a partir da hora escolhida naive grade.
@@ -234,9 +231,9 @@ const Calendar = () => {
     try {
       const res = await fetch('http://localhost:5000/api/events', {
         method: 'POST',
+        credentials: 'include',
         headers: {
           'Content-Type': 'application/json',
-          'Authorization': `Bearer ${token}`,
         },
         body: JSON.stringify({
           // legado (mantido para compatibilidade)
@@ -260,7 +257,7 @@ const Calendar = () => {
       setShowAddEventModal(false);
       setEventTitle('');
       setSelectedHour(null);
-      fetchEvents(token);
+      fetchEvents(!!user);
     } catch {
       alert('Erro de conexão ao criar evento.');
     }
@@ -269,7 +266,7 @@ const Calendar = () => {
   // Export: envia e-mail com anexo .ics para importar no celular
   const handleExportEmail = async (e?: React.FormEvent) => {
     if (e) e.preventDefault();
-    if (!token) return;
+    if (!user) return;
     const destino = exportEmail.trim();
     if (!destino || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(destino)) {
       setExportFeedback({ type: 'err', text: 'Digite um e-mail válido para receber a agenda no celular.' });
@@ -285,9 +282,9 @@ const Calendar = () => {
       }
       const res = await fetch('http://localhost:5000/api/events/export-email', {
         method: 'POST',
+        credentials: 'include',
         headers: {
           'Content-Type': 'application/json',
-          'Authorization': `Bearer ${token}`,
         },
         body: JSON.stringify(payload),
       });
@@ -309,7 +306,7 @@ const Calendar = () => {
   };
 
   const handleDownloadICS = async () => {
-    if (!token) return;
+    if (!user) return;
     setExportLoading(true);
     setExportFeedback(null);
     try {
@@ -317,7 +314,7 @@ const Calendar = () => {
         ? `?mes=${currentDate.getMonth() + 1}&ano=${currentDate.getFullYear()}`
         : '';
       const res = await fetch(`http://localhost:5000/api/events/export.ics${params}`, {
-        headers: { 'Authorization': `Bearer ${token}` },
+        credentials: 'include',
       });
       if (!res.ok) throw new Error('Não foi possível gerar o arquivo .ics.');
       const blob = await res.blob();
@@ -488,7 +485,7 @@ const Calendar = () => {
               <p className="text-sm text-gray-400 mb-5">
                 Envie os eventos por e-mail com anexo <span className="text-gray-200 font-medium">eventos.ics</span> e importe direto no calendário do celular.
               </p>
-              {!token ? (
+              {!user ? (
                 <div className="text-center py-8 space-y-3">
                   <Lock className="mx-auto text-yellow-400" size={28} />
                   <p className="text-gray-300 text-sm font-medium">Faça login para exportar</p>
@@ -624,7 +621,7 @@ const Calendar = () => {
                 <span className="text-[11px] text-gray-500">Grade 00–23h · clique numa hora para agendar</span>
               </div>
 
-              {!token ? (
+              {!user ? (
                 <div className="text-center py-12 space-y-3">
                   <Lock className="mx-auto text-yellow-400" size={32} />
                   <p className="text-gray-300 font-medium">Conteúdo Protegido por JWT</p>
@@ -731,7 +728,7 @@ const Calendar = () => {
               )}
             </div>
             
-            {token && (
+            {user && (
               <button 
                 onClick={() => openNewEvent(selectedHour ?? undefined)}
                 className={`w-full mt-8 py-4 rounded-2xl font-bold text-lg transition-all relative z-10 flex items-center justify-center gap-2

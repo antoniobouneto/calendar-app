@@ -1,4 +1,5 @@
 import { Test, TestingModule } from '@nestjs/testing';
+import { ConfigModule } from '@nestjs/config';
 import { ValkeyService } from './valkey.service';
 
 describe('ValkeyService', () => {
@@ -6,6 +7,13 @@ describe('ValkeyService', () => {
 
   beforeEach(async () => {
     const module: TestingModule = await Test.createTestingModule({
+      imports: [
+        ConfigModule.forRoot({
+          ignoreEnvFile: true,
+          ignoreEnvVars: true,
+          load: [() => ({ VALKEY_ALLOW_MEMORY_FALLBACK: 'true' })],
+        }),
+      ],
       providers: [ValkeyService],
     }).compile();
 

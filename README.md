@@ -14,9 +14,9 @@ Secure calendar app with JWT, RBAC, and O(1) session checks via Valkey Sets. Nes
 
 - Monthly calendar + hourly grid (00–23h) in the day sidebar
 - Multiple events per day, each in its own hour slot
-- All-day events (`diaInteiro=true`, 00:00–23:59)
-- `.ics` export (download or email for mobile import)
-- Valkey Set fallback to in-memory when Valkey is down
+- All-day events (`diaInteiro=true`, handled as a pure date end-to-end)
+- `.ics` export (download or email for mobile import, all-day uses `VALUE=DATE`)
+- Fail-closed sessions: Valkey down → `503`, never silent local-memory auth
 
 ## Hourly grid
 
@@ -24,7 +24,8 @@ The day sidebar shows every hour as a clickable slot. Click one to open the new-
 
 - No `UNIQUE(user, day)` — multi-event days are the norm.
 - `dataFim` must be after `dataInicio`, otherwise `400`.
-- DB remodel (`1793979730000-RemodelEventosHorarios`): `CHECK(data_fim >= data_inicio)` + indexes on `(data_inicio, data_fim)` and `(usuario_id, data_inicio, data_fim)`.
+- DB remodel (`1793979730000-RemodelEventosHorarios`): `CHECK(data_fim >= data_inicio)` + indexes on `(data_inicio, data_fim)` and `(usuario_id, data_inicio, data_fim)`; plus a `tsrange` GiST index for overlap queries (`1793980000000-TstzRangeEvento`).
+- Timezone: `APP_TIMEZONE=America/Sao_Paulo` defines day boundaries; `?data=2026-11-09` means midnight in that zone (DST-safe). `diaInteiro` is stored as the whole local day and exported as `VALUE=DATE` (exclusive end).
 - Day filter uses overlap: `dataInicio <= endOfDay AND dataFim >= startOfDay`.
 
 ```http
@@ -45,39 +46,38 @@ POST /api/events                 # ADMIN only
 flowchart TB
     subgraph Frontend["Frontend - Next.js 16"]
         UI["Calendar UI - month + hourly grid 00-23h"]
-        FEAuth["JWT + Auth State"]
+        FEAuth["httpOnly cookie - calendar_jwt"]
     end
     subgraph Backend["Backend - NestJS 11"]
-        Gateway["API Gateway - /api"]
-        Auth["Auth Module - bcrypt + JWT"]
+        Gateway["API Gateway - /api + helmet + Throttler"]
+        Auth["Auth Module - bcrypt + JWT + cookie"]
         subgraph EventsModule["Events Module"]
             Controller["Events Controller - GET, POST, PATCH"]
-            Service["Events Service - findByDay + validation"]
-            ExportSvc["Export Service - .ics + email"]
-            Entity["Evento Entity - STI"]
+            Service["Events Service - findByDay + timezone + validation"]
+            ExportSvc["Export Service - .ics VALUE=DATE"]
+            Entity["Evento Entity + tsrange GiST"]
         end
         DBModule["Database Module - TypeORM"]
-        Guard["Security Guard - JWT + SISMEMBER"]
+        Guard["Security Guard - cookie/Bearer + SISMEMBER"]
     end
     subgraph Data["Data Layer"]
         PG[("PostgreSQL - calendar_app")]
-        Valkey[("Valkey / Redis")]
-        Memory[("In-Memory Fallback")]
+        Valkey[("Valkey / Redis - session:roles + user:sessions")]
     end
-    UI -->|"Bearer JWT"| Gateway
+    UI -->|"cookie httpOnly"| Gateway
     Gateway --> Guard --> Controller --> Service --> Entity --> DBModule --> PG
     Controller --> ExportSvc --> PG
     Guard -->|"SISMEMBER O(1)"| Valkey
-    Guard -. fallback .-> Memory
     Auth -->|"SADD roles"| Valkey
-    Auth -->|"issue JWT"| FEAuth
+    Auth -->|"issue JWT + cookie"| FEAuth
 ```
 
 ## Security (Valkey Set strategy)
 
-- Login stores roles with `SADD session:roles:<userId>:<jti>`; the guard checks `SISMEMBER` in O(1).
-- `USER` reads events; `ADMIN` manages events. Each JWT has a unique `jti`.
-- Logout deletes the session set, revoking access instantly (OWASP A01/A07).
+- Login stores roles with `SADD session:roles:<userId>:<jti>` (+ `user:sessions:<userId>` index); the guard checks `SISMEMBER` in O(1). Key TTL equals JWT TTL.
+- **Fail-closed:** if Valkey is down, protected routes return `503` (not `401`/`403`). The in-memory fallback exists only when `VALKEY_ALLOW_MEMORY_FALLBACK=true` (local dev/tests).
+- Token travels as an `httpOnly + SameSite=Lax` cookie (`calendar_jwt`, never `localStorage`); Bearer is still accepted for API clients. `GET /auth/me` restores the session on reload. CORS is restricted to `CORS_ORIGINS`, helmet is on, and login is throttled (5/min, IP).
+- `USER` reads events; `ADMIN` manages events. Each JWT has a unique `jti`; logout deletes the session set, revoking access instantly (OWASP A01/A07). `POST /auth/logout` also clears the cookie.
 
 ## Tech Stack
 
@@ -94,6 +94,8 @@ powershell -ExecutionPolicy Bypass -File .\scripts\start-postgres.ps1
 copy backend\.env.example backend\.env   # DB_HOST, DB_PORT=5434, DB_PASSWORD=postgres
 
 # 2. Backend (http://localhost:5000/api)
+#    No Valkey locally? enable the dev-only fallback:
+#    $env:VALKEY_ALLOW_MEMORY_FALLBACK='true'; node dist/main
 cd backend; npm install; npm run migration:run; npm run start:dev
 
 # 3. Frontend (http://localhost:3000)

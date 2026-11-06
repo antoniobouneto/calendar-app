@@ -4,6 +4,7 @@ import {
   BadRequestException,
   Logger,
 } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository, Between } from 'typeorm';
 import { EventoEntity } from './entities/evento.entity';
@@ -20,7 +21,51 @@ export class EventsService {
   constructor(
     @InjectRepository(EventoEntity)
     private readonly eventoRepository: Repository<EventoEntity>,
+    private readonly config: ConfigService,
   ) {}
+
+  private get tz(): string {
+    return this.config.get<string>('APP_TIMEZONE', 'America/Sao_Paulo');
+  }
+
+  /**
+   * Meia-noite UTC que corresponde a YYYY-MM-DD 00:00 em APP_TIMEZONE (item 2).
+   * Usa Intl para não depender do fuso da máquina que roda o servidor.
+   */
+  private zonedStartOfDay(yyyyMmDd: string): Date {
+    const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(yyyyMmDd);
+    if (!m) throw new BadRequestException('data inválida (esperado YYYY-MM-DD)');
+    const [, ys, ms, ds] = m;
+    const y = Number(ys), mo = Number(ms), d = Number(ds);
+    let guess = Date.UTC(y, mo - 1, d, 0, 0, 0, 0);
+    // Ajusta até guess corresponder a 00:00 no fuso alvo (converge em 2 iterações).
+    for (let i = 0; i < 2; i++) {
+      const parts: Record<string, string> = {};
+      for (const p of new Intl.DateTimeFormat('en-US', {
+        timeZone: this.tz, hour12: false, year: 'numeric', month: '2-digit',
+        day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit',
+      }).formatToParts(new Date(guess))) parts[p.type] = p.value;
+      const asUTC = Date.UTC(Number(parts.year), Number(parts.month) - 1, Number(parts.day),
+        Number(parts.hour) % 24, Number(parts.minute), Number(parts.second));
+      guess += Date.UTC(y, mo - 1, d, 0, 0, 0, 0) - asUTC;
+    }
+    return new Date(guess);
+  }
+
+  private addDays(yyyyMmDd: string, n: number): string {
+    const [y, m, d] = yyyyMmDd.split('-').map(Number);
+    const dt = new Date(Date.UTC(y, m - 1, d + n));
+    return dt.toISOString().slice(0, 10);
+  }
+
+  /** YYYY-MM-DD que o instante `d` ocupa em APP_TIMEZONE. */
+  private dateStrInTz(d: Date): string {
+    const parts: Record<string, string> = {};
+    for (const p of new Intl.DateTimeFormat('en-CA', {
+      timeZone: this.tz, year: 'numeric', month: '2-digit', day: '2-digit',
+    }).formatToParts(d)) parts[p.type] = p.value;
+    return `${parts.year}-${parts.month}-${parts.day}`;
+  }
 
   /** Formato de saída compatível com o frontend legado ({id,title,date})
    *  + formato da especificação ({titulo,dataInicio,dataFim,...}) */
@@ -66,14 +111,9 @@ export class EventsService {
    * de início — base da grade horária 00–23h da aba "Eventos do Dia".
    */
   async findByDay(data: string, usuarioId?: string) {
-    const dia = new Date(`${data}T00:00:00.000`);
-    if (isNaN(dia.getTime())) {
-      throw new BadRequestException('data inválida (esperado YYYY-MM-DD)');
-    }
-    const inicioDia = new Date(dia);
-    inicioDia.setHours(0, 0, 0, 0);
-    const fimDia = new Date(dia);
-    fimDia.setHours(23, 59, 59, 999);
+    const inicioDia = this.zonedStartOfDay(data);
+    // Fim = próxima meia-noite no mesmo fuso − 1ms (respeita DST, item 2).
+    const fimDia = new Date(this.zonedStartOfDay(this.addDays(data, 1)).getTime() - 1);
 
     // Condição de sobreposição: inicio <= fimDia AND fim >= inicioDia.
     // Como o TypeORM não monta "OR" de intervalos num find() simples,
@@ -99,8 +139,9 @@ export class EventsService {
       return this.findByDay(query.data, query.usuarioId);
     }
     if (query.mes && query.ano) {
-      const inicioMes = new Date(query.ano, query.mes - 1, 1, 0, 0, 0);
-      const fimMes = new Date(query.ano, query.mes, 0, 23, 59, 59, 999);
+      const inicioMes = this.zonedStartOfDay(`${query.ano}-${String(query.mes).padStart(2, '0')}-01`);
+      const fimMes = new Date(this.zonedStartOfDay(
+        new Date(Date.UTC(query.ano, query.mes, 1)).toISOString().slice(0, 10)).getTime() - 1);
       const where: any = { dataInicio: Between(inicioMes, fimMes) };
       if (query.usuarioId) where.usuarioId = query.usuarioId;
       const eventos = await this.eventoRepository.find({
@@ -151,16 +192,14 @@ export class EventsService {
     const isRecorrente =
       dto.tipo === TipoEvento.RECORRENTE || !!dto.frequencia;
 
-    // Normalização dia_inteiro: ocupa 00:00 → 23:59:59 do dia de início.
-    // Permite a grade horária contrapor "Dia todo" vs horários específicos.
+    // Normalização dia_inteiro: ocupa o dia inteiro em APP_TIMEZONE
+    // (00:00 do dia até 00:00 do dia seguinte − 1ms), item 2.
+    // Na exportação .ics vira VALUE=DATE com fim exclusivo.
     let diaInteiro = dto.diaInteiro ?? false;
     if (diaInteiro) {
-      const inicioDia = new Date(dataInicio);
-      inicioDia.setHours(0, 0, 0, 0);
-      const fimDia = new Date(dataInicio);
-      fimDia.setHours(23, 59, 59, 999);
-      dataInicio.setHours(0, 0, 0, 0);
-      dataFim = fimDia;
+      const dateStr = this.dateStrInTz(dataInicio);
+      dataInicio.setTime(this.zonedStartOfDay(dateStr).getTime());
+      dataFim = new Date(this.zonedStartOfDay(this.addDays(dateStr, 1)).getTime() - 1);
     } else {
       // No modo horária, o fim deve ser estritamente depois do início.
       // Múltiplos eventos no mesmo dia são permitidos (sem UNIQUE de dia).
@@ -235,14 +274,11 @@ export class EventsService {
 
     Object.assign(evento, patch);
 
-    // Revalida o intervalo após o patch (grade horária).
+    // Revalida o intervalo após o patch (grade horária, APP_TIMEZONE).
     if (evento.diaInteiro) {
-      const inicioDia = new Date(evento.dataInicio);
-      inicioDia.setHours(0, 0, 0, 0);
-      const fimDia = new Date(evento.dataInicio);
-      fimDia.setHours(23, 59, 59, 999);
-      evento.dataInicio = inicioDia;
-      evento.dataFim = fimDia;
+      const dateStr = this.dateStrInTz(new Date(evento.dataInicio));
+      evento.dataInicio = this.zonedStartOfDay(dateStr);
+      evento.dataFim = new Date(this.zonedStartOfDay(this.addDays(dateStr, 1)).getTime() - 1);
     } else if (
       new Date(evento.dataFim).getTime() <= new Date(evento.dataInicio).getTime()
     ) {

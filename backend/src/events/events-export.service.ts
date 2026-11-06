@@ -47,8 +47,20 @@ export class EventsExportService {
       lines.push('BEGIN:VEVENT');
       lines.push(`UID:${ev.id}-nexus-${ev.titulo?.slice(0, 20).replace(/[^\w\-]/g, '')}@calendar.local`);
       lines.push(`DTSTAMP:${dtstamp}`);
-      lines.push(`DTSTART:${this.toICSDate(inicio)}`);
-      lines.push(`DTEND:${this.toICSDate(fim)}`);
+      // Dia inteiro: VALUE=DATE com DTEND exclusivo (dia seguinte), item 2.
+      // Evita 00:00–23:59:59 fuso-dependente e vira "dia todo" nativo no celular.
+      if ((ev as EventoEntity).diaInteiro) {
+        const tz = this.config.get<string>('APP_TIMEZONE', 'America/Sao_Paulo');
+        const dateStr = new Intl.DateTimeFormat('en-CA', {
+          timeZone: tz, year: 'numeric', month: '2-digit', day: '2-digit',
+        }).format(inicio);
+        const next = new Date(inicio.getTime() + 86400000);
+        lines.push(`DTSTART;VALUE=DATE:${dateStr.replace(/-/g, '')}`);
+        lines.push(`DTEND;VALUE=DATE:${new Intl.DateTimeFormat('en-CA', { timeZone: tz, year: 'numeric', month: '2-digit', day: '2-digit' }).format(next).replace(/-/g, '')}`);
+      } else {
+        lines.push(`DTSTART:${this.toICSDate(inicio)}`);
+        lines.push(`DTEND:${this.toICSDate(fim)}`);
+      }
       lines.push(`SUMMARY:${this.escapeICS(ev.titulo || 'Evento')}`);
       if (ev.descricao) {
         lines.push(`DESCRIPTION:${this.escapeICS(ev.descricao)}`);
