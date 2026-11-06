@@ -44,32 +44,44 @@ POST /api/events                 # ADMIN only
 
 ```mermaid
 flowchart TB
-    subgraph Frontend["Frontend - Next.js 16"]
+    subgraph FE["Frontend - Next.js 16"]
         UI["Calendar UI - month + hourly grid 00-23h"]
-        FEAuth["httpOnly cookie - calendar_jwt"]
+        CK["Cookie httpOnly - calendar_jwt"]
     end
-    subgraph Backend["Backend - NestJS 11"]
-        Gateway["API Gateway - /api + helmet + Throttler"]
-        Auth["Auth Module - bcrypt + JWT + cookie"]
-        subgraph EventsModule["Events Module"]
-            Controller["Events Controller - GET, POST, PATCH"]
-            Service["Events Service - findByDay + timezone + validation"]
-            ExportSvc["Export Service - .ics VALUE=DATE"]
-            Entity["Evento Entity + tsrange GiST"]
+    subgraph API["Backend - NestJS 11"]
+        Edge["Edge - Helmet + CORS + Throttler"]
+        subgraph SEC["Security"]
+            Guard["SecurityGuard - cookie or Bearer"]
+            Jwt["JwtService + ConfigModule"]
         end
-        DBModule["Database Module - TypeORM"]
-        Guard["Security Guard - cookie/Bearer + SISMEMBER"]
+        subgraph AUTH["AuthModule"]
+            AC["AuthController - login, me, logout"]
+            AS["AuthService - bcrypt + jti"]
+            BC["Cookie httpOnly SameSite"]
+        end
+        subgraph EV["EventsModule"]
+            EC["EventsController - GET, POST, PATCH, DELETE"]
+            ES["EventsService - findByDay APP_TIMEZONE + overlap"]
+            EX["EventsExportService - ICS VALUE=DATE + email"]
+            ET["Evento Entity - STI + CHECK + tsrange"]
+            DB["DatabaseModule - TypeORM + migrations"]
+        end
     end
-    subgraph Data["Data Layer"]
-        PG[("PostgreSQL - calendar_app")]
-        Valkey[("Valkey / Redis - session:roles + user:sessions")]
+    subgraph STORE["Data Layer"]
+        PG[("PostgreSQL - calendar_app - table eventos")]
+        VK[("Valkey - session:roles + user:sessions")]
     end
-    UI -->|"cookie httpOnly"| Gateway
-    Gateway --> Guard --> Controller --> Service --> Entity --> DBModule --> PG
-    Controller --> ExportSvc --> PG
-    Guard -->|"SISMEMBER O(1)"| Valkey
-    Auth -->|"SADD roles"| Valkey
-    Auth -->|"issue JWT + cookie"| FEAuth
+    UI -->|"https + cookie"| Edge
+    Edge --> Guard
+    Guard --> Jwt
+    Guard --> EC
+    AC --> AS --> Jwt
+    AS -->|"SADD roles + TTL = JWT TTL"| VK
+    Guard -->|"SISMEMBER O(1)"| VK
+    EC --> ES --> ET --> DB --> PG
+    EC --> EX --> PG
+    AS -->|"issue JWT + set-cookie"| BC --> CK
+    Guard -. "fail-closed 503 if down" .-> VK
 ```
 
 ## Security (Valkey Set strategy)
