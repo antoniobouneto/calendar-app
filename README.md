@@ -112,7 +112,7 @@ flowchart TB
         Memory[("In-Memory Set Fallback")]
     end
 
-    UI -->|Bearer JWT| Gateway
+    UI -->|"Bearer JWT"| Gateway
     FEAuth --> UI
     Gateway --> Guard
     Guard --> Controller
@@ -122,10 +122,10 @@ flowchart TB
     Entity --> DBModule
     DBModule --> PG
     ExportSvc --> PG
-    Guard -->|SISMEMBER O(1)| Valkey
+    Guard -->|"SISMEMBER O(1)"| Valkey
     Guard -. fallback .-> Memory
-    Auth -->|SADD roles| Valkey
-    Auth -->|issue JWT| FEAuth
+    Auth -->|"SADD roles"| Valkey
+    Auth -->|"issue JWT"| FEAuth
 ```
 
 ## Why the Valkey Set Strategy?
