@@ -84,31 +84,48 @@ POST /api/events                # ADMIN — accepts times
 ## Architecture
 
 ```mermaid
-flowchart LR
-    subgraph Frontend[Frontend - Next.js]
-        UI[Calendar UI]
-        FEAuth[JWT + Auth State]
+flowchart TB
+    subgraph Frontend["Frontend - Next.js 16"]
+        UI["Calendar UI - month grid + hourly grid 00-23h"]
+        FEAuth["JWT + Auth State"]
     end
 
-    subgraph Backend[Backend - NestJS]
-        Gateway[API Gateway]
-        Auth[Auth Module]
-        Guard[Security Guard]
-        Events[Events Module]
+    subgraph Backend["Backend - NestJS 11"]
+        Gateway["API Gateway - global prefix /api"]
+        Auth["Auth Module - bcrypt + JWT signing"]
+
+        subgraph EventsModule["Events Module"]
+            Controller["Events Controller - GET ?data / ?mes / ?ano, POST, PATCH"]
+            Service["Events Service - findByDay + overlap query + hour validation"]
+            ExportSvc["Export Service - .ics build + email"]
+            DTO["DTOs - CreateEventoDto, ListEventosQueryDto"]
+            Entity["Evento Entity - STI: PONTUAL / RECORRENTE"]
+        end
+
+        DBModule["Database Module - TypeORM + migrationsRun"]
+        Guard["Security Guard - JWT verify + SISMEMBER O(1)"]
     end
 
-    subgraph Cache[Session Role Store]
-        Valkey[(Valkey / Redis)]
-        Memory[(In-Memory Set Fallback)]
+    subgraph Data["Data Layer"]
+        PG[("PostgreSQL 5434 - calendar_app, table eventos")]
+        Valkey[("Valkey / Redis - session:roles sets")]
+        Memory[("In-Memory Set Fallback")]
     end
 
-    UI --> Gateway
+    UI -->|Bearer JWT| Gateway
+    FEAuth --> UI
     Gateway --> Guard
-    Guard --> Valkey
+    Guard --> Controller
+    Controller --> Service
+    Controller --> ExportSvc
+    Service --> Entity
+    Entity --> DBModule
+    DBModule --> PG
+    ExportSvc --> PG
+    Guard -->|SISMEMBER O(1)| Valkey
     Guard -. fallback .-> Memory
-    Auth --> Valkey
-    Events --> Valkey
-    Auth --> Gateway
+    Auth -->|SADD roles| Valkey
+    Auth -->|issue JWT| FEAuth
 ```
 
 ## Why the Valkey Set Strategy?
